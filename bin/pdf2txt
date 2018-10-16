@@ -1,0 +1,104 @@
+#!/bin/bash
+## convert all pdf files to jpgs
+export DENSITY=250
+# pdf-to-jpg conversion density
+# should create training data and test this
+# note: whe have to export it to make it visible withing shell functions
+
+NP=$(( $(grep -c ^processor /proc/cpuinfo) / 2))
+# number of jobs in parallel
+export OMP=3
+echo "running on $NP CPUs, tesseract on $OMP threads"
+export CONVERT="/usr/bin/convert"
+# use imagemagick convert.  nori has something else mapped to /usr/local/bin/convert
+. ./conf
+# set data location environment
+
+export TESS_LOG=tesseract.log
+DATADIR=$DATAROOT/CaseFiles
+# store images in a temp directory
+txtdir=$DATAROOT/txt
+if ! [ -d $txtdir ]; then
+    mkdir $txtdir
+fi
+saveifs=$IFS
+IFS=$'\n'
+
+convert-to-txt () {
+    infile=$1
+    outdir=$2
+    # outfile w/directory but w/o extension
+    fname=$(basename "$infile")
+    imgdir=$(mktemp -d)
+    # make thread-local image dir
+    IFS=$'\n'
+    if ! [[ -f "${outdir}/${fname%.*}-000.txt" ]] || [[ "${infile}" -nt "${outdir}/${fname%.*}-000.txt" ]]; then
+    	# if we dont have first page txt, or it's outdated, do convert + ocr
+    	$CONVERT -density $DENSITY "${infile}" -strip -density $DENSITY "${imgdir}/${fname%.*}-%03d.png"
+	pngs=$(find ${imgdir} -name ${fname%.*}-*.png)
+	if [ "$pngs" == "" ]; then
+	    echo something wrong: no pngs
+	    echo searchname  ${fname%.*}-*.png
+	    echo find ${imgdir} -name ${fname%.*}-*.png
+	    ls $imgdir
+	    return 1
+	    # no files could be converted
+	fi
+	for png in $pngs; do
+	    pngname=$(basename "$png")
+    	    OMP_THREAD_LIMIT=$OMP tesseract -l eng "$png" "${outdir}/${pngname%.png}" >>${TESS_LOG} 2>>&1
+	    # see https://github.com/tesseract-ocr/tesseract/issues/898
+	    # run convert in parallel at nCpu/2, and thread tesseract
+	done
+    else
+	echo $outdir/${fname} already done
+    fi
+    rm -rf ${imgdir}
+    return 0
+    # all right :-)
+}
+export -f convert-to-txt
+
+echo "tesseract stderr log" >${TESS_LOG}
+nCases=0
+# total cases seen
+for state in $(ls $DATADIR); do
+    echo $state state
+    statepdf=$DATADIR/$state
+    statetxt=$txtdir/$state
+    if ! [ -d $statetxt ]; then
+	mkdir $statetxt
+    fi
+    counties=$(ls $statepdf | sed '/^Test$/d')
+    # delete the possible 'Test' county
+    for county in $counties; do
+	echo $state $county county
+	yearpdf=$statepdf/$county
+	yeartxt=$statetxt/$county
+	if ! [ -d $yeartxt ]; then
+	    mkdir $yeartxt
+	fi
+	for year in $(ls $yearpdf); do
+	    echo $state $county $year year
+	    casepdf=$yearpdf/$year
+	    casetxt=$yeartxt/$year
+	    if ! [ -d $casetxt ]; then
+		mkdir $casetxt
+	    fi
+	    for eviction in $(ls $casepdf); do
+		nCases=$((nCases + 1))
+		echo $nCases: $state $county $year $eviction 
+		evictiondir=$casepdf/$eviction
+		evictiontxt=$casetxt/$eviction
+		if ! [ -d $evictiontxt ]; then
+		    mkdir $evictiontxt
+		fi
+		find ${evictiondir} -name "*.pdf" | parallel -j $NP convert-to-txt {} ${evictiontxt}
+		# parallel adds file name at the end
+	    done
+	done
+    done
+done
+IFS=$saveifs
+echo "In total ${nCases} cases"
+echo "thats it for now :-)"
